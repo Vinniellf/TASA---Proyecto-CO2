@@ -1,0 +1,135 @@
+#include <SoftwareSerial.h>
+
+// ============================
+// Configuración de pines RAK3172
+// ============================
+#define RAK_RX 13  // D7 - Conectar al TX del RAK3172
+#define RAK_TX 2   // D4 - Conectar al RX del RAK3172
+
+SoftwareSerial rakSerial(RAK_RX, RAK_TX);
+
+// ============================
+// Configuración del sensor MH-Z19B
+// ============================
+#define PWM_PIN 4    // D2 - salida PWM del sensor
+#define HD_PIN  D1   // pin de calibración (opcional)
+#define RANGE_PPM 2000
+
+// ============================
+// Funciones auxiliares
+// ============================
+
+// Enviar comando AT al RAK3172 y mostrar respuesta
+void enviarComando(String cmd, unsigned long espera = 1000) {
+  Serial.print(">> Enviando: ");
+  Serial.println(cmd);
+  rakSerial.println(cmd);
+
+  unsigned long start = millis();
+  String respuesta = "";
+  while (millis() - start < espera) {
+    if (rakSerial.available()) {
+      char c = rakSerial.read();
+      respuesta += c;
+    }
+  }
+  Serial.println("Respuesta:");
+  Serial.println(respuesta);
+  Serial.println("----------------------------------------");
+}
+
+// Calibrar sensor manualmente (opcional)
+void manualZeroCalibrate() {
+  Serial.println(">>> Calibrando cero: asegúrate de estar en aire exterior (~400 ppm) y estable 20+ minutos");
+  digitalWrite(HD_PIN, LOW);
+  delay(8000);
+  digitalWrite(HD_PIN, HIGH);
+  Serial.println(">>> Calibración HD aplicada. Espera unos minutos para estabilizar.");
+}
+
+// Leer el valor del MH-Z19B (modo PWM)
+float leerCO2ppm() {
+  unsigned long th = pulseIn(PWM_PIN, HIGH, 2000000); // microsegundos
+  unsigned long tl = pulseIn(PWM_PIN, LOW, 2000000);
+
+  if (th == 0 || tl == 0) return -1; // lectura inválida
+
+  float ms_th = th / 1000.0;
+  float ms_tl = tl / 1000.0;
+
+  // Fórmula oficial del datasheet
+  float ppm = RANGE_PPM * (ms_th - 2.0) / (ms_th + ms_tl - 4.0);
+  return ppm;
+}
+
+// ============================
+// SETUP
+// ============================
+void setup() {
+  Serial.begin(115200);
+  pinMode(PWM_PIN, INPUT);
+  pinMode(HD_PIN, OUTPUT);
+  digitalWrite(HD_PIN, HIGH); // inactivo
+
+  Serial.println("\n\n========================================");
+  Serial.println(" Configuración automática RAK3172 + MH-Z19B ");
+  Serial.println("========================================");
+
+  rakSerial.begin(115200);
+  delay(2000);
+
+  // Test inicial
+  enviarComando("AT");
+
+  // ============================
+  // Configuración LoRaWAN
+  // ============================
+  enviarComando("AT+NWM=1");   // Modo LoRaWAN
+  enviarComando("AT+NJM=1");   // OTAA
+  enviarComando("AT+BAND=6");  // AU915
+  enviarComando("AT+CLASS=A");
+  enviarComando("AT+MASK=0001");
+  enviarComando("AT+DEVEUI=45c6ad4b1adfe7ed");
+  enviarComando("AT+APPEUI=974b3724e410103c");
+  enviarComando("AT+APPKEY=e0ea1cbc19edac0a2cbdfa163ecdd105");
+
+  // Intentar unirse a la red
+  enviarComando("AT+JOIN=1:0:10:8", 8000);
+  Serial.println("Esperando unión a la red LoRaWAN...");
+  delay(5000);
+
+  Serial.println("========================================");
+  Serial.println("Inicio completado. Enviando datos cada 60s...\n");
+}
+
+// ============================
+// LOOP
+// ============================
+void loop() {
+    if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    if (cmd.equalsIgnoreCase("cal")) {
+      manualZeroCalibrate();
+    }
+  }
+  // Leer CO2
+  float co2ppm = leerCO2ppm();
+  if (co2ppm > 0) {
+    Serial.print("CO2: ");
+    Serial.print(co2ppm, 1);
+    Serial.println(" ppm");
+
+    // Convertir ppm a entero y luego a string hexadecimal (2 bytes)
+    int valor = (int)co2ppm;
+    char payloadHex[5];
+    sprintf(payloadHex, "%04X", valor); // ej: 041A para 1050 ppm
+
+    String comando = "AT+SEND=2:" + String(payloadHex);
+    enviarComando(comando, 3000); // enviar por LoRaWAN
+  } else {
+    Serial.println("Error de lectura del sensor MH-Z19B");
+  }
+
+  delay(60000); // enviar cada 60s
+}
